@@ -2,10 +2,7 @@
 #include "sensor_msgs/msg/laser_scan.hpp"
 #include <cmath>
 #include <array>
-#include <vector>
 
-constexpr float max_range = 0.8;
-constexpr float threshold = 0.001;
 
 class LaserScanListener : public rclcpp::Node
 {
@@ -28,6 +25,24 @@ private:
 
     using Point = std::pair<float, float>;
 
+    float max_range = 0.8;
+    float threshold = 0.001;
+    double pose_estimation = 0;
+    
+    double rad_to_deg(double radians)
+    {
+        return radians * 180.0 / M_PI;
+    }
+
+    double angle_regulation(double angle)
+    {
+        while (angle >= M_PI)
+            angle -= 2 * M_PI;
+        while (angle < -M_PI)
+            angle += 2 * M_PI;
+        return angle;
+    }
+
     std::pair<Line, Line> calculate_lines_from_three_points(const Point& p1, const Point& p2, const Point& p3)
     {
         // Line 1: a1x + b1y + c1 = 0, through p1 and p2
@@ -49,24 +64,24 @@ private:
                std::sqrt(line.a * line.a + line.b * line.b);
     }
 
-    size_t find_best_combination(const std::array<Point, 360>& positions, size_t count, float threshold)
+    void find_best_combination(const std::array<Point, 360>& positions, size_t count, float threshold)
     {
         size_t max_count = 0;
         Line best_line1, best_line2;
 
-        for (size_t i = 0; i < count; ++i) {
-            for (size_t j = i + 1; j < count; ++j) {
-                for (size_t k = 0; k < count; ++k) {
+        for (size_t i = 0; i < count; i++) {
+            for (size_t j = i + 1; j < count; j++) {
+                for (size_t k = 0; k < count; k++) {
                     if (k == i || k == j)
                         continue;
 
                     auto [line1, line2] = calculate_lines_from_three_points(positions[i], positions[j], positions[k]);
 
                     size_t inliers = 0;
-                    for (size_t l = 0; l < count; ++l) {
+                    for (size_t l = 0; l < count; l++) {
                         if (calculate_distance_to_line(positions[l], line1) <= threshold ||
                             calculate_distance_to_line(positions[l], line2) <= threshold) {
-                            ++inliers;
+                            inliers++;
                         }
                     }
 
@@ -79,14 +94,37 @@ private:
             }
         }
 
+        double pose = atan2(-best_line1.a, best_line1.b);
+
+        std::array<double, 4> possible_poses = 
+        {angle_regulation(pose), angle_regulation(pose + 0.5 * M_PI),
+         angle_regulation(pose + M_PI), angle_regulation(pose + 1.5 * M_PI)};
+
+        double closest_pose = possible_poses[0];
+        double min_difference = possible_poses[0] - pose_estimation;
+        min_difference = angle_regulation(min_difference);
+        min_difference = std::abs(min_difference);
+
+        for (size_t i = 0; i < possible_poses.size(); i++) {
+            double diff = possible_poses[i] - pose_estimation;
+            diff = angle_regulation(diff);
+            diff = std::abs(diff);
+
+            if (diff < min_difference) {
+                closest_pose = possible_poses[i];
+                min_difference = diff;
+            }
+        }
+
+        pose_estimation = closest_pose;
+
         std::cout << "Number of points: " << count << std::endl;
         std::cout << "Maximum  Inliers: " << max_count << std::endl;
         std::cout << "Best combination of lines:" << std::endl;
         std::cout << "Line 1: y = " << - best_line1.a / best_line1.b << " x + " << - best_line1.c / best_line1.b << std::endl;
         std::cout << "Line 2: y = " << - best_line2.a / best_line2.b << " x + " << - best_line2.c / best_line2.b << std::endl;
+        std::cout << "Pose estimation: " << rad_to_deg(pose_estimation) << "deg" <<std::endl;
         std::cout << "\n" << std::endl;
-
-        return max_count;
     }
 
     void scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg)
@@ -95,7 +133,7 @@ private:
         std::array<Point, max_points> positions;
         size_t count = 0;
 
-        for (size_t i = 0; i < msg->ranges.size(); ++i) {
+        for (size_t i = 0; i < msg->ranges.size(); i++) {
             float angle = msg->angle_min + i * msg->angle_increment;
             float distance = msg->ranges[i];
 
